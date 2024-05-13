@@ -1,6 +1,6 @@
 module ipfs-pinning-service
 
-go 1.22.1
+go 1.22
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
