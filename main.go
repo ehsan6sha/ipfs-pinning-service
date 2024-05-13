@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -16,6 +17,7 @@ import (
 	"github.com/ipfs/go-cid"
 )
 
+// Define structures for manifest upload requests and responses
 type ManifestBatchUploadRequest struct {
 	Cid               []string           `json:"cid"`
 	PoolID            int                `json:"pool_id"`
@@ -39,9 +41,11 @@ type ManifestJob struct {
 	Uri    string `json:"uri"`
 }
 
+// Global variables
 var (
-	blockchainEndpoint = "http://127.0.0.1:4000" // Endpoint for the blockchain service
+	blockchainEndpoint = "http://127.0.0.1:4000" // Blockchain service endpoint
 	ipfsClusterAPI     ipfsCluster.Client
+	authTokens         = map[string]bool{"your-secret-token": true} // Example token storage
 )
 
 func init() {
@@ -78,7 +82,7 @@ func handleManifestBatchUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Proceed with IPFS Cluster pinning
 	pinOptions := ipfsClusterClientApi.PinOptions{
-		Mode: 0,
+		Mode: ipfsClusterClientApi.PinModeRecursive,
 	}
 
 	for _, cidStr := range blockchainResp.Cid {
@@ -120,10 +124,80 @@ func callBlockchain(method, action string, payload interface{}) ([]byte, int, er
 	return respBody, resp.StatusCode, nil
 }
 
-func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/api/v0/manifests", handleManifestBatchUpload).Methods("POST")
+func handleIPFSPinRequest(w http.ResponseWriter, r *http.Request) {
+    var pinRequest struct {
+        CID     string `json:"cid"`
+        Name    string `json:"name"`
+        Origins []string `json:"origins"`
+        Meta    map[string]string `json:"meta"`
+    }
+    
+    if err := json.NewDecoder(r.Body).Decode(&pinRequest); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
 
-	log.Println("Server is running on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", r))
+    // Translate to internal format
+    internalRequest := ManifestBatchUploadRequest{
+        Cid: []string{pinRequest.CID},
+        PoolID: 0, // Default or derived value
+        ReplicationFactor: []int{1}, // Default value
+        ManifestMetadata: []ManifestMetadata{
+            {
+                Job: ManifestJob{
+                    Work:   "storage", // Default work type
+                    Engine: "IPFS",
+                    Uri:    pinRequest.CID,
+                },
+            },
+        },
+    }
+
+    // Now pass to existing blockchain call
+    resp, statusCode, err := callBlockchain("POST", "fula-manifest-batch_upload", internalRequest)
+    if err != nil || statusCode != http.StatusOK {
+        http.Error(w, "Failed to process pin request: "+err.Error(), statusCode)
+        return
+    }
+
+    // Assume blockchain response is in a suitable format
+    var blockchainResp ManifestBatchUploadResponse
+    if err := json.Unmarshal(resp, &blockchainResp); err != nil {
+        http.Error(w, "Failed to parse blockchain response", http.StatusInternalServerError)
+        return
+    }
+
+    // Translate blockchain response to IPFS Pinning Service format
+    ipfsPinStatus := translateToIPFSPinStatus(blockchainResp, pinRequest)
+    
+    json.NewEncoder(w).Encode(ipfsPinStatus)
+}
+
+func translateToIPFSPi
+
+
+func main() {
+    r := mux.NewRouter()
+    apiRouter := r.PathPrefix("/api/v0").Subrouter()
+    apiRouter.Use(authenticateMiddleware)
+    apiRouter.HandleFunc("/pins", handleIPFSPinRequest).Methods("POST")
+
+    log.Println("Server is running on port 8008...")
+    log.Fatal(http.ListenAndServe(":8008", apiRouter))
+}
+
+func authenticateMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if token == "" || !strings.HasPrefix(token, "Bearer ") {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		actualToken := strings.TrimPrefix(token, "Bearer ")
+		if _, exists := authTokens[actualToken]; !exists {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
