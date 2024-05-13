@@ -184,14 +184,14 @@ func handleIPFSPinRequest(w http.ResponseWriter, r *http.Request) {
 	var pinRequest Pin // Change from an anonymous struct to a defined type
 
 	if err := json.NewDecoder(r.Body).Decode(&pinRequest); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, `{"error":{"reason":"BAD_REQUEST", "details":"`+err.Error()+`"}}`, http.StatusBadRequest)
 		return
 	}
 
 	poolID, err := strconv.Atoi(globalConfig.PoolName)
 	if err != nil {
 		log.Printf("Invalid pool ID in config: %v", err)
-		http.Error(w, "Invalid pool ID configuration", http.StatusInternalServerError)
+		http.Error(w, `{"error":{"reason":"BAD_REQUEST", "details":"Invalid pool ID configuration"}}`, http.StatusBadRequest)
 		return
 	}
 	// Translate to internal format
@@ -213,14 +213,14 @@ func handleIPFSPinRequest(w http.ResponseWriter, r *http.Request) {
 	// Now pass to existing blockchain call
 	resp, statusCode, err := callBlockchain("POST", "fula-manifest-batch_upload", internalRequest)
 	if err != nil || statusCode != http.StatusOK {
-		http.Error(w, "Failed to process pin request: "+err.Error(), statusCode)
+		http.Error(w, `{"error":{"reason":"INTERNAL_SERVER_ERROR", "details":"Failed to process pin request`+err.Error()+`"}}`, http.StatusInternalServerError)
 		return
 	}
 
 	// Assume blockchain response is in a suitable format
 	var blockchainResp ManifestBatchUploadResponse
 	if err := json.Unmarshal(resp, &blockchainResp); err != nil {
-		http.Error(w, "Failed to parse blockchain response", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error":{"reason":"INTERNAL_SERVER_ERROR", "details":"%s"}}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
 
@@ -233,10 +233,10 @@ func handleIPFSPinRequest(w http.ResponseWriter, r *http.Request) {
 func translateToIPFSPinStatus(blockResp ManifestBatchUploadResponse, pinRequest Pin) PinStatus {
 	return PinStatus{
 		RequestID: fmt.Sprintf("%v", blockResp.PoolID), // Assuming PoolID can serve as a RequestID
-		Status:    "pinned",                            // Example status
+		Status:    "queued",                            // Example status
 		Created:   time.Now().Format(time.RFC3339),
 		Pin:       pinRequest,
-		Delegates: []string{}, // Example value
+		Delegates: []string{fmt.Sprintf("/dns4/pools%d.functionyard.fula.network/tcp/4001/p2p/QmServicePeerId", blockResp.PoolID)},
 		Info:      map[string]string{"storer": blockResp.Storer},
 	}
 }
