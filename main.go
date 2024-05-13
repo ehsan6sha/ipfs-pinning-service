@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	ipfsClusterClientApi "github.com/ipfs-cluster/ipfs-cluster/api"
 	ipfsCluster "github.com/ipfs-cluster/ipfs-cluster/api/rest/client"
 	"github.com/ipfs/go-cid"
+	"gopkg.in/yaml.v2"
 )
 
 // Define structures for manifest upload requests and responses
@@ -41,15 +44,68 @@ type ManifestJob struct {
 	Uri    string `json:"uri"`
 }
 
+type Pin struct {
+	CID     string            `json:"cid"`
+	Name    string            `json:"name,omitempty"`
+	Origins []string          `json:"origins,omitempty"`
+	Meta    map[string]string `json:"meta,omitempty"`
+}
+
+type PinStatus struct {
+	RequestID string            `json:"requestid"`
+	Status    string            `json:"status"`
+	Created   string            `json:"created"`
+	Pin       Pin               `json:"pin"`
+	Delegates []string          `json:"delegates,omitempty"`
+	Info      map[string]string `json:"info,omitempty"`
+}
+
 // Global variables
 var (
 	blockchainEndpoint = "http://127.0.0.1:4000" // Blockchain service endpoint
 	ipfsClusterAPI     ipfsCluster.Client
 	authTokens         = map[string]bool{"your-secret-token": true} // Example token storage
+	globalConfig       *Config
 )
+
+type Config struct {
+	Identity                  string   `yaml:"identity"`
+	StoreDir                  string   `yaml:"storeDir"`
+	PoolName                  string   `yaml:"poolName"`
+	LogLevel                  string   `yaml:"logLevel"`
+	ListenAddrs               []string `yaml:"listenAddrs"`
+	Authorizer                string   `yaml:"authorizer"`
+	AuthorizedPeers           []string `yaml:"authorizedPeers"`
+	IpfsBootstrapNodes        []string `yaml:"ipfsBootstrapNodes"`
+	StaticRelays              []string `yaml:"staticRelays"`
+	ForceReachabilityPrivate  bool     `yaml:"forceReachabilityPrivate"`
+	AllowTransientConnection  bool     `yaml:"allowTransientConnection"`
+	DisableResourceManager    bool     `yaml:"disableResourceManger"`
+	MaxCIDPushRate            int      `yaml:"maxCIDPushRate"`
+	IpniPublishDisabled       bool     `yaml:"ipniPublishDisabled"`
+	IpniPublishInterval       string   `yaml:"ipniPublishInterval"`
+	IpniPublishDirectAnnounce []string `yaml:"IpniPublishDirectAnnounce"`
+	IpniPublisherIdentity     string   `yaml:"ipniPublisherIdentity"`
+}
+
+func readConfig(configPath string) (*Config, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	var config Config
+	if err = yaml.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
 
 func init() {
 	var err error
+	globalConfig, err = readConfig("/internal/.fula/config.yaml")
+	if err != nil {
+		log.Fatalf("Error reading config file: %v", err)
+	}
 	ipfsClusterConfig := ipfsCluster.Config{}
 	ipfsClusterAPI, err = ipfsCluster.NewDefaultClient(&ipfsClusterConfig)
 	if err != nil {
@@ -125,65 +181,74 @@ func callBlockchain(method, action string, payload interface{}) ([]byte, int, er
 }
 
 func handleIPFSPinRequest(w http.ResponseWriter, r *http.Request) {
-    var pinRequest struct {
-        CID     string `json:"cid"`
-        Name    string `json:"name"`
-        Origins []string `json:"origins"`
-        Meta    map[string]string `json:"meta"`
-    }
-    
-    if err := json.NewDecoder(r.Body).Decode(&pinRequest); err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
-        return
-    }
+	var pinRequest Pin // Change from an anonymous struct to a defined type
 
-    // Translate to internal format
-    internalRequest := ManifestBatchUploadRequest{
-        Cid: []string{pinRequest.CID},
-        PoolID: 0, // Default or derived value
-        ReplicationFactor: []int{1}, // Default value
-        ManifestMetadata: []ManifestMetadata{
-            {
-                Job: ManifestJob{
-                    Work:   "storage", // Default work type
-                    Engine: "IPFS",
-                    Uri:    pinRequest.CID,
-                },
-            },
-        },
-    }
+	if err := json.NewDecoder(r.Body).Decode(&pinRequest); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-    // Now pass to existing blockchain call
-    resp, statusCode, err := callBlockchain("POST", "fula-manifest-batch_upload", internalRequest)
-    if err != nil || statusCode != http.StatusOK {
-        http.Error(w, "Failed to process pin request: "+err.Error(), statusCode)
-        return
-    }
+	poolID, err := strconv.Atoi(globalConfig.PoolName)
+	if err != nil {
+		log.Printf("Invalid pool ID in config: %v", err)
+		http.Error(w, "Invalid pool ID configuration", http.StatusInternalServerError)
+		return
+	}
+	// Translate to internal format
+	internalRequest := ManifestBatchUploadRequest{
+		Cid:               []string{pinRequest.CID},
+		PoolID:            poolID,   // Default or derived value
+		ReplicationFactor: []int{1}, // Default value
+		ManifestMetadata: []ManifestMetadata{
+			{
+				Job: ManifestJob{
+					Work:   "storage", // Default work type
+					Engine: "IPFS",
+					Uri:    pinRequest.CID,
+				},
+			},
+		},
+	}
 
-    // Assume blockchain response is in a suitable format
-    var blockchainResp ManifestBatchUploadResponse
-    if err := json.Unmarshal(resp, &blockchainResp); err != nil {
-        http.Error(w, "Failed to parse blockchain response", http.StatusInternalServerError)
-        return
-    }
+	// Now pass to existing blockchain call
+	resp, statusCode, err := callBlockchain("POST", "fula-manifest-batch_upload", internalRequest)
+	if err != nil || statusCode != http.StatusOK {
+		http.Error(w, "Failed to process pin request: "+err.Error(), statusCode)
+		return
+	}
 
-    // Translate blockchain response to IPFS Pinning Service format
-    ipfsPinStatus := translateToIPFSPinStatus(blockchainResp, pinRequest)
-    
-    json.NewEncoder(w).Encode(ipfsPinStatus)
+	// Assume blockchain response is in a suitable format
+	var blockchainResp ManifestBatchUploadResponse
+	if err := json.Unmarshal(resp, &blockchainResp); err != nil {
+		http.Error(w, "Failed to parse blockchain response", http.StatusInternalServerError)
+		return
+	}
+
+	// Translate blockchain response to IPFS Pinning Service format
+	ipfsPinStatus := translateToIPFSPinStatus(blockchainResp, pinRequest)
+
+	json.NewEncoder(w).Encode(ipfsPinStatus)
 }
 
-func translateToIPFSPi
-
+func translateToIPFSPinStatus(blockResp ManifestBatchUploadResponse, pinRequest Pin) PinStatus {
+	return PinStatus{
+		RequestID: fmt.Sprintf("%v", blockResp.PoolID), // Assuming PoolID can serve as a RequestID
+		Status:    "pinned",                            // Example status
+		Created:   time.Now().Format(time.RFC3339),
+		Pin:       pinRequest,
+		Delegates: []string{}, // Example value
+		Info:      map[string]string{"storer": blockResp.Storer},
+	}
+}
 
 func main() {
-    r := mux.NewRouter()
-    apiRouter := r.PathPrefix("/api/v0").Subrouter()
-    apiRouter.Use(authenticateMiddleware)
-    apiRouter.HandleFunc("/pins", handleIPFSPinRequest).Methods("POST")
+	r := mux.NewRouter()
+	apiRouter := r.PathPrefix("/api/v0").Subrouter()
+	apiRouter.Use(authenticateMiddleware)
+	apiRouter.HandleFunc("/pins", handleIPFSPinRequest).Methods("POST")
 
-    log.Println("Server is running on port 8008...")
-    log.Fatal(http.ListenAndServe(":8008", apiRouter))
+	log.Println("Server is running on port 8008...")
+	log.Fatal(http.ListenAndServe(":8008", apiRouter))
 }
 
 func authenticateMiddleware(next http.Handler) http.Handler {
