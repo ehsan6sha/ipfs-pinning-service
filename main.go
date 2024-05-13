@@ -243,7 +243,7 @@ func translateToIPFSPinStatus(blockResp ManifestBatchUploadResponse, pinRequest 
 
 func main() {
 	r := mux.NewRouter()
-	apiRouter := r.PathPrefix("/").Subrouter()
+	apiRouter := r.PathPrefix("").Subrouter()
 	apiRouter.Use(authenticateMiddleware)
 	apiRouter.HandleFunc("/pins", handleIPFSPinRequest).Methods("POST")
 
